@@ -19,11 +19,10 @@ type Dotd struct {
 }
 
 type Config struct {
-	Addr        string
-	Upstream    string
-	Logs        bool
-	ConsoleLogs bool
-	FileLog     string
+	Addr     string
+	Upstream string
+	Verbose  bool
+	FileLog  string
 }
 
 func New(cfg *Config) *Dotd {
@@ -34,13 +33,15 @@ func New(cfg *Config) *Dotd {
 
 func (dd *Dotd) Listen() {
 	//Logging to a file
-	f, err := os.OpenFile(dd.Config.FileLog, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("error opening file: %v", err)
+	if dd.Config.FileLog != "" {
+		f, err := os.OpenFile(dd.Config.FileLog, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			log.Fatalf("error opening file: %v", err)
+		}
+		defer f.Close()
+		log.SetOutput(f)
+		dd.Log(log.Printf, "server: starting to log\n")
 	}
-	defer f.Close()
-	log.SetOutput(f)
-	dd.Log(log.Printf, "server: starting to log\n")
 
 	udpAddr, err := net.ResolveUDPAddr("udp", dd.Config.Addr)
 	if err != nil {
@@ -67,7 +68,7 @@ func (dd *Dotd) Listen() {
 }
 
 func (dd *Dotd) answerMessage(bt []byte, addr *net.UDPAddr) {
-	if dd.Config.Logs {
+	if dd.Config.Verbose {
 		msg := &dnsmessage.Message{}
 		err := msg.Unpack(bt)
 
@@ -102,7 +103,7 @@ func (dd *Dotd) answerMessage(bt []byte, addr *net.UDPAddr) {
 		dd.Log(log.Printf, "error: %s\n", err)
 	}
 
-	if dd.Config.Logs {
+	if dd.Config.Verbose {
 		resMsg := &dnsmessage.Message{}
 		err = resMsg.Unpack(resBody)
 		if err != nil {
@@ -113,9 +114,11 @@ func (dd *Dotd) answerMessage(bt []byte, addr *net.UDPAddr) {
 }
 
 func (dd *Dotd) Log(wLog fnLog, format string, v ...interface{}) {
-	if dd.Config.ConsoleLogs {
+	if dd.Config.Verbose {
 		fmt.Printf(format, v...)
 	}
 
-	wLog(format, v...)
+	if dd.Config.FileLog != "" {
+		wLog(format, v...)
+	}
 }
