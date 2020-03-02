@@ -11,7 +11,9 @@ var (
 	addrFlag     string
 	upstreamFlag string
 	logsFlag     bool
+	printLogFlag bool
 	versionFlag  bool
+	fileLogFlag  string
 	version      = "0.0.0"
 	commit       = "commithash"
 )
@@ -20,6 +22,8 @@ func init() {
 	flag.StringVar(&addrFlag, "address", "[::]:53", "udp address")
 	flag.StringVar(&upstreamFlag, "upstream", "https://1.1.1.1/dns-query", "upstream dns server")
 	flag.BoolVar(&logsFlag, "logs", false, "enable logs")
+	flag.BoolVar(&printLogFlag, "plogs", false, "print logs on terminal")
+	flag.StringVar(&fileLogFlag, "flogs", "debug.log", "print logs to file")
 	flag.BoolVar(&versionFlag, "version", false, "output version")
 }
 
@@ -41,9 +45,11 @@ func main() {
 	fmt.Printf("%s\n\n", appString)
 
 	srv := dotd.New(&dotd.Config{
-		Addr:     addrFlag,
-		Upstream: upstreamFlag,
-		Logs:     logsFlag,
+		Addr:        addrFlag,
+		Upstream:    upstreamFlag,
+		Logs:        logsFlag,
+		ConsoleLogs: printLogFlag,
+		FileLog:     fileLogFlag,
 	})
 
 	srv.Listen()
