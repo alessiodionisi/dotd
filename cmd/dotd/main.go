@@ -17,8 +17,8 @@ var (
 )
 
 func init() {
-	flag.StringVar(&addrFlag, "address", "[::]:53", "udp address")
-	flag.StringVar(&upstreamFlag, "upstream", "https://1.1.1.1/dns-query", "upstream dns server")
+	flag.StringVar(&addrFlag, "address", "[::]:53", "listening address")
+	flag.StringVar(&upstreamFlag, "upstream", "https://1.1.1.1/dns-query", "upstream DoH server")
 	flag.BoolVar(&logsFlag, "logs", false, "enable logs")
 	flag.BoolVar(&versionFlag, "version", false, "output version")
 }
@@ -38,7 +38,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	fmt.Printf("%s\n\n", appString)
+	fmt.Printf("%s\n", appString)
 
 	srv := dotd.New(&dotd.Config{
 		Addr:     addrFlag,

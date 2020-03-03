@@ -28,11 +28,11 @@ Simply run `dotd` executable then set `127.0.0.1` for IPv4 and `::1` for IPv6 as
 ```
 Usage: dotd [options]
   -address string
-        udp address (default "[::]:53")
+        listening address (default "[::]:53")
   -logs
         enable logs
   -upstream string
-        upstream dns server (default "https://1.1.1.1/dns-query")
+        upstream DoH server (default "https://1.1.1.1/dns-query")
   -version
         output version
 ```

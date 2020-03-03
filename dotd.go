@@ -2,12 +2,12 @@ package dotd
 
 import (
 	"bytes"
-	"fmt"
 	"golang.org/x/net/dns/dnsmessage"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 )
 
 type Dotd struct {
@@ -28,9 +28,21 @@ func New(cfg *Config) *Dotd {
 }
 
 func (dd *Dotd) Listen() {
-	udpAddr, err := net.ResolveUDPAddr("udp", dd.Config.Addr)
+	host, port, err := net.SplitHostPort(dd.Config.Addr)
 	if err != nil {
 		log.Fatalf("error: %s\n", err)
+	}
+
+	ip := net.ParseIP(host)
+	intPort, err := strconv.Atoi(port)
+	if err != nil {
+		log.Fatalf("error: %s\n", err)
+	}
+
+	udpAddr := &net.UDPAddr{
+		IP:   ip,
+		Port: intPort,
+		Zone: "",
 	}
 
 	dd.udpConn, err = net.ListenUDP("udp", udpAddr)
@@ -45,7 +57,8 @@ func (dd *Dotd) Listen() {
 	for {
 		bufLen, peerAddr, err := dd.udpConn.ReadFromUDP(buf)
 		if err != nil {
-			fmt.Printf("error: %s\n", err)
+			log.Printf("error: %s\n", err)
+			return
 		}
 
 		go dd.answerMessage(buf[:bufLen], peerAddr)
@@ -57,15 +70,18 @@ func (dd *Dotd) answerMessage(bt []byte, addr *net.UDPAddr) {
 		msg := &dnsmessage.Message{}
 		err := msg.Unpack(bt)
 		if err != nil {
-			fmt.Printf("error: %s\n", err)
+			log.Printf("error: %s\n", err)
+			return
 		}
+
 		log.Printf("dns: <- %s ID: %d Q: %+v\n", addr, msg.ID, msg.Questions)
 	}
 
 	reqRdr := bytes.NewReader(bt)
 	req, err := http.NewRequest(http.MethodPost, dd.Config.Upstream, reqRdr)
 	if err != nil {
-		fmt.Printf("error: %s\n", err)
+		log.Printf("error: %s\n", err)
+		return
 	}
 
 	req.Header.Add("content-type", "application/dns-message")
@@ -73,25 +89,30 @@ func (dd *Dotd) answerMessage(bt []byte, addr *net.UDPAddr) {
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Printf("error: %s\n", err)
+		log.Printf("error: %s\n", err)
+		return
 	}
 
 	resBody, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		fmt.Printf("error: %s\n", err)
+		log.Printf("error: %s\n", err)
+		return
 	}
 
 	_, err = dd.udpConn.WriteToUDP(resBody, addr)
 	if err != nil {
-		fmt.Printf("error: %s\n", err)
+		log.Printf("error: %s\n", err)
+		return
 	}
 
 	if dd.Config.Logs {
 		resMsg := &dnsmessage.Message{}
 		err = resMsg.Unpack(resBody)
 		if err != nil {
-			fmt.Printf("error: %s\n", err)
+			log.Printf("error: %s\n", err)
+			return
 		}
+
 		log.Printf("dns: -> %s ID: %d A: %+v\n", addr, resMsg.ID, resMsg.Answers)
 	}
 }
