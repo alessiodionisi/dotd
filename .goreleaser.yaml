@@ -1,0 +1,39 @@
+builds:
+  - main: cmd/dotd/main.go
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - 386
+      - arm64
+      - arm
+      - ppc64le
+    ldflags:
+      - -s -w -X github.com/adnsio/dotd/pkg/cmd.version={{.Version}} -X github.com/adnsio/dotd/pkg/cmd.commit={{.Commit}}
+checksum:
+  name_template: checksums.txt
+snapshot:
+  name_template: "{{ .Tag }}-next"
+brews:
+  - description: DotD is a Simple and flexible DNS over HTTPS proxy with custom resolver and other perks.
+    homepage: https://github.com/adnsio/dotd
+    tap:
+      owner: adnsio
+      name: homebrew-tap
+    install: |
+      bin.install "dotd"
+    test: |
+      system "#{bin}/dotd -v"
+archives:
+  - files:
+      - LICENSE
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

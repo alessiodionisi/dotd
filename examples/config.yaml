@@ -1,0 +1,7 @@
+address: "[::1]:53"
+upstreams:
+  - https://1.1.1.1/dns-query
+  - https://1.0.0.1/dns-query
+resolve:
+  dotd.host: "127.0.0.1"
+logLevel: trace

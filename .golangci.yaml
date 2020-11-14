@@ -1,0 +1,13 @@
+linters:
+  enable:
+    - goimports
+    - gosec
+    - interfacer
+    - dupl
+    - maligned
+    - misspell
+    - prealloc
+    - unconvert
+    - gocyclo
+    - goconst
+    - gocognit
