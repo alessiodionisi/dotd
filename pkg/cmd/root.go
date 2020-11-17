@@ -41,10 +41,10 @@ func init() {
 
 	cobra.OnInitialize(initConfig)
 
-	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", `config file (default "config.yaml|json|toml|hcl|ini")`)
-	rootCmd.PersistentFlags().StringP("log-level", "l", "info", `log level, valid values are "trace", "debug", "info", "warn", "error", "fatal" or "panic"`)
+	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "config file to use")
+	rootCmd.PersistentFlags().StringP("loglevel", "l", "info", `log level, valid values are "trace", "debug", "info", "warn", "error", "fatal" or "panic"`)
 
-	_ = viper.BindPFlag("logLevel", rootCmd.PersistentFlags().Lookup("log-level"))
+	_ = viper.BindPFlags(rootCmd.PersistentFlags())
 
 	rootCmd.AddCommand(serverCmd)
 }
@@ -53,19 +53,20 @@ func initConfig() {
 	if configFile != "" {
 		viper.SetConfigFile(configFile)
 	} else {
-		workingDir, err := os.Getwd()
-		if err != nil {
-			log.Fatal().Err(err).Send()
-		}
-
-		viper.AddConfigPath(workingDir)
-		viper.SetConfigName("config")
+		viper.AddConfigPath("$HOME/.config/dotd")
+		viper.SetConfigName("dotd")
 	}
 
 	viper.AutomaticEnv()
 
-	if err := viper.ReadInConfig(); err == nil {
-		log.Info().Msgf("using config file %s", viper.ConfigFileUsed())
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			log.Fatal().Msg(err.Error())
+		}
+	}
+
+	if viper.ConfigFileUsed() != "" {
+		log.Info().Msgf(`using config file "%s"`, viper.ConfigFileUsed())
 	}
 }
 

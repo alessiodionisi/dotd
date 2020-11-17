@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/adnsio/dotd/pkg/roundrobin"
 	"github.com/rs/zerolog/log"
@@ -17,225 +18,285 @@ import (
 )
 
 type Server struct {
-	address *net.UDPAddr
-	roundr  *roundrobin.RoundRobin
-	conn    *net.UDPConn
-	resolve map[string]string
+	udpAddress         *net.UDPAddr
+	upstreamRoundRobin *roundrobin.RoundRobin
+	udpConnection      *net.UDPConn
+	blocklistMap       map[string]bool
+	resolveMap         map[string]string
+	httpClient         *http.Client
 }
 
 func (s *Server) ListenAndServe() error {
 	var err error
-	s.conn, err = net.ListenUDP("udp", s.address)
+	s.udpConnection, err = net.ListenUDP("udp", s.udpAddress)
 	if err != nil {
 		return err
 	}
-	defer s.conn.Close()
+	defer s.udpConnection.Close()
 
-	log.Info().Msgf("listening on %s", s.address.String())
+	log.Info().Msgf("listening on %s", s.udpAddress.String())
 
 	exit := make(chan bool)
 	for i := 0; i < runtime.NumCPU(); i++ {
-		go s.listen()
+		// launch a go routine to read data from udp
+		go s.readFromUDP()
 	}
 	<-exit
 
 	return nil
 }
 
-func (s *Server) listen() {
+func (s *Server) readFromUDP() {
 	data := make([]byte, 1024)
 	for {
-		length, addr, err := s.conn.ReadFromUDP(data)
+		dataLength, addr, err := s.udpConnection.ReadFromUDP(data)
 		if err != nil {
-			log.Err(err).Stack().Caller().Send()
+			// log error and continue
+			log.Error().Msg(err.Error())
 			continue
 		}
 
-		log.Debug().
-			Int("length", length).
-			Msgf("received data from %s", addr.String())
-
+		// launch a go routine to answer
 		go func() {
-			err := s.answer(addr, data[:length])
+			// unpack data as dns message
+			dnsMessage := &dnsmessage.Message{}
+			err := dnsMessage.Unpack(data[:dataLength])
 			if err != nil {
-				log.Err(err).Stack().Caller().Send()
+				log.Error().Msg(err.Error())
+				return
+			}
+
+			if err := s.answerDNSMessage(addr, dnsMessage, data[:dataLength]); err != nil {
+				log.Error().
+					Uint16("id", dnsMessage.ID).
+					Msg(err.Error())
 			}
 		}()
 	}
 }
 
-func (s *Server) answer(addr *net.UDPAddr, data []byte) error {
-	msg := &dnsmessage.Message{}
-
-	err := msg.Unpack(data)
-	if err != nil {
-		return err
-	}
-
-	firstQuestion := msg.Questions[0]
+func (s *Server) answerDNSMessage(addr *net.UDPAddr, dnsMessage *dnsmessage.Message, data []byte) error {
+	question := dnsMessage.Questions[0]
 
 	log.Debug().
-		Uint16("id", msg.ID).
-		Str("name", firstQuestion.Name.String()).
-		Str("type", firstQuestion.Type.String()).
+		Uint16("id", dnsMessage.ID).
+		Str("name", question.Name.String()).
+		Str("type", question.Type.String()).
 		Msgf("dns question from %s", addr.String())
 
-	name := firstQuestion.Name.Data[:firstQuestion.Name.Length-1]
-	resolved, ok := s.resolve[string(name)]
-	if ok && resolved != "" {
-		log.Debug().
-			Uint16("id", msg.ID).
-			Msgf("resolving %s", firstQuestion.Name.String())
-
-		resolvedIP := net.ParseIP(resolved)
-		if resolvedIP == nil {
-			return fmt.Errorf(`invalid ip address "%s"`, resolved)
-		}
-
-		msg.Header.Response = true
-		msg.Header.RecursionAvailable = true
-
-		switch firstQuestion.Type {
-		case dnsmessage.TypeA:
-			ip4 := resolvedIP.To4()
-			if ip4 == nil {
-				if err := s.writeDNSMessage(addr, msg); err != nil {
-					return err
-				}
-
-				break
-			}
-
-			var a [4]byte
-			copy(a[:], ip4)
-
-			msg.Answers = []dnsmessage.Resource{
-				{
-					Header: dnsmessage.ResourceHeader{
-						Name:  firstQuestion.Name,
-						Type:  dnsmessage.TypeA,
-						Class: dnsmessage.ClassINET,
-					},
-					Body: &dnsmessage.AResource{
-						A: a,
-					},
-				},
-			}
-		case dnsmessage.TypeAAAA:
-			if resolvedIP.To4() != nil {
-				if err := s.writeDNSMessage(addr, msg); err != nil {
-					return err
-				}
-
-				break
-			}
-
-			var aaaa [16]byte
-			copy(aaaa[:], resolvedIP)
-
-			msg.Answers = []dnsmessage.Resource{
-				{
-					Header: dnsmessage.ResourceHeader{
-						Name:  firstQuestion.Name,
-						Type:  dnsmessage.TypeAAAA,
-						Class: dnsmessage.ClassINET,
-					},
-					Body: &dnsmessage.AAAAResource{
-						AAAA: aaaa,
-					},
-				},
-			}
-		default:
-			if err := s.writeDNSMessage(addr, msg); err != nil {
-				return err
-			}
-		}
-
-		if err := s.writeDNSMessage(addr, msg); err != nil {
-			return err
-		}
-
-		log.Debug().
-			Uint16("id", msg.ID).
-			Msg("dns question answered")
-
-	} else {
-		if err := s.forwardToUpstream(addr, data, msg.ID); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (s *Server) writeDNSMessage(addr *net.UDPAddr, msg *dnsmessage.Message) error {
-	resData, err := msg.Pack()
+	// try resolve
+	answeredDNSMessage, err := s.answerQuestionWithResolveMap(dnsMessage.ID, &question)
 	if err != nil {
 		return err
 	}
 
-	_, err = s.conn.WriteToUDP(resData, addr)
+	if answeredDNSMessage != nil {
+		if err := s.writeDNSMessageToUPD(answeredDNSMessage, addr); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	// try blocklist
+	answeredDNSMessage = s.answerQuestionWithBlocklistMap(dnsMessage.ID, &question)
+	if answeredDNSMessage != nil {
+		if err := s.writeDNSMessageToUPD(answeredDNSMessage, addr); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	// forward to upstream
+	answerData, err := s.forwardDataToUpstream(dnsMessage.ID, data)
 	if err != nil {
+		return err
+	}
+
+	if err := s.writeDataToUDP(dnsMessage.ID, answerData, addr); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *Server) forwardToUpstream(addr *net.UDPAddr, data []byte, id uint16) error {
-	for i := 0; i < s.roundr.Length(); i++ {
-		upstream, err := s.roundr.Pick()
+func (s *Server) writeDNSMessageToUPD(msg *dnsmessage.Message, addr *net.UDPAddr) error {
+	msgData, err := msg.Pack()
+	if err != nil {
+		return err
+	}
+
+	if err := s.writeDataToUDP(msg.ID, msgData, addr); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) writeDataToUDP(id uint16, data []byte, addr *net.UDPAddr) error {
+	_, err := s.udpConnection.WriteToUDP(data, addr)
+	if err != nil {
+		return err
+	}
+
+	log.Debug().
+		Uint16("id", id).
+		Msg("dns question answered")
+
+	return nil
+}
+
+func (s *Server) forwardDataToUpstream(id uint16, data []byte) ([]byte, error) {
+	maxAttempts := s.upstreamRoundRobin.Length()
+
+	for i := 0; i < maxAttempts; i++ {
+		upstream, err := s.upstreamRoundRobin.Pick()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		log.Debug().
 			Uint16("id", id).
 			Int("attempt", i+1).
-			Int("upstreams", s.roundr.Length()).
-			Msgf("forwarding request to %s", upstream.String())
+			Int("maxAttempts", maxAttempts).
+			Msgf(`forwarding request to "%s"`, upstream.String())
 
 		dataReader := bytes.NewReader(data)
 		req, err := http.NewRequest(http.MethodPost, upstream.String(), dataReader)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		req.Header.Add("content-type", "application/dns-message")
 		req.Header.Add("accept", "application/dns-message")
 
-		res, err := http.DefaultClient.Do(req)
+		res, err := s.httpClient.Do(req)
 		if err != nil {
-			log.Err(err).Stack().Caller().Send()
+			log.Error().
+				Uint16("id", id).
+				Int("attempt", i+1).
+				Msg(err.Error())
 			continue
 		}
 
 		if res.StatusCode != 200 {
-			log.Err(errors.New("invalid status code")).Stack().Caller().Send()
+			log.Error().
+				Uint16("id", id).
+				Int("attempt", i+1).
+				Msgf(`request to "%s" has an invalid status code "%d"`, req.URL.String(), res.StatusCode)
 			continue
 		}
 
 		resData, err := ioutil.ReadAll(res.Body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		_, err = s.conn.WriteToUDP(resData, addr)
-		if err != nil {
-			return err
-		}
+		return resData, nil
+	}
 
-		log.Debug().
-			Uint16("id", id).
-			Msg("dns question answered")
+	return nil, errors.New("max attempts reached")
+}
 
+func (s *Server) answerQuestionWithBlocklistMap(id uint16, question *dnsmessage.Question) *dnsmessage.Message {
+	name := question.Name.Data[:question.Name.Length-1]
+
+	blocklisted, ok := s.blocklistMap[string(name)]
+	if !ok || !blocklisted {
 		return nil
 	}
 
-	return errors.New("max attempts reached")
+	log.Warn().
+		Uint16("id", id).
+		Msgf(`"%s" is blocked`, name)
+
+	answeredDNSMessage := &dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 id,
+			Response:           true,
+			RecursionAvailable: true,
+			RecursionDesired:   true,
+			RCode:              dnsmessage.RCodeNameError,
+		},
+	}
+
+	return answeredDNSMessage
 }
 
-func parseAddress(address string) (*net.UDPAddr, error) {
+func (s *Server) answerQuestionWithResolveMap(id uint16, question *dnsmessage.Question) (*dnsmessage.Message, error) {
+	name := question.Name.Data[:question.Name.Length-1]
+	resolved, ok := s.resolveMap[string(name)]
+	if !ok || resolved == "" {
+		return nil, nil
+	}
+
+	log.Debug().
+		Uint16("id", id).
+		Msgf(`resolving "%s"`, name)
+
+	resolvedIP := net.ParseIP(resolved)
+	if resolvedIP == nil {
+		return nil, fmt.Errorf(`invalid ip address "%s"`, resolved)
+	}
+
+	answeredDNSMessage := &dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 id,
+			Response:           true,
+			RecursionAvailable: true,
+			RecursionDesired:   true,
+		},
+	}
+
+	switch question.Type {
+	case dnsmessage.TypeA:
+		ip4 := resolvedIP.To4()
+		if ip4 == nil {
+			return answeredDNSMessage, nil
+		}
+
+		var a [4]byte
+		copy(a[:], ip4)
+
+		answeredDNSMessage.Answers = []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name:  question.Name,
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+				},
+				Body: &dnsmessage.AResource{
+					A: a,
+				},
+			},
+		}
+	case dnsmessage.TypeAAAA:
+		if resolvedIP.To4() != nil {
+			return answeredDNSMessage, nil
+		}
+
+		var aaaa [16]byte
+		copy(aaaa[:], resolvedIP)
+
+		answeredDNSMessage.Answers = []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name:  question.Name,
+					Type:  dnsmessage.TypeAAAA,
+					Class: dnsmessage.ClassINET,
+				},
+				Body: &dnsmessage.AAAAResource{
+					AAAA: aaaa,
+				},
+			},
+		}
+	}
+
+	return answeredDNSMessage, nil
+}
+
+func parseUDPAddress(address string) (*net.UDPAddr, error) {
 	host, stringPort, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -257,8 +318,13 @@ func parseAddress(address string) (*net.UDPAddr, error) {
 	}, nil
 }
 
-func New(address string, upstreams []string, resolve map[string]string) (*Server, error) {
-	udpAddress, err := parseAddress(address)
+func New(
+	address string,
+	upstreams []string,
+	blocklist []string,
+	resolveMap map[string]string,
+) (*Server, error) {
+	udpAddress, err := parseUDPAddress(address)
 	if err != nil {
 		return nil, err
 	}
@@ -275,9 +341,18 @@ func New(address string, upstreams []string, resolve map[string]string) (*Server
 
 	upstreamRR := roundrobin.New(upstreamURLs)
 
+	blocklistMap := make(map[string]bool, len(blocklist))
+	for _, blocklistItem := range blocklist {
+		blocklistMap[blocklistItem] = true
+	}
+
 	return &Server{
-		address: udpAddress,
-		roundr:  upstreamRR,
-		resolve: resolve,
+		udpAddress:         udpAddress,
+		upstreamRoundRobin: upstreamRR,
+		blocklistMap:       blocklistMap,
+		resolveMap:         resolveMap,
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+		},
 	}, nil
 }

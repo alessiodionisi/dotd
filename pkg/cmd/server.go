@@ -23,23 +23,26 @@ func init() {
 	serverCmd.Flags().StringSlice("blocklist", []string{}, "blocked domains")
 	serverCmd.Flags().StringToString("resolve", map[string]string{}, "custom resolve list")
 
-	_ = viper.BindPFlag("address", serverCmd.Flags().Lookup("address"))
-	_ = viper.BindPFlag("upstreams", serverCmd.Flags().Lookup("upstreams"))
-	_ = viper.BindPFlag("blocklist", serverCmd.Flags().Lookup("blocklist"))
-	_ = viper.BindPFlag("resolve", serverCmd.Flags().Lookup("resolve"))
+	_ = viper.BindPFlags(serverCmd.Flags())
 }
 
 func runServer(cmd *cobra.Command, args []string) {
 	address := viper.GetString("address")
 	upstreams := viper.GetStringSlice("upstreams")
-	resolve := viper.GetStringMapString("resolve")
+	blocklist := viper.GetStringSlice("blocklist")
+	resolveMap := viper.GetStringMapString("resolve")
 
-	server, err := server.New(address, upstreams, resolve)
+	server, err := server.New(
+		address,
+		upstreams,
+		blocklist,
+		resolveMap,
+	)
 	if err != nil {
-		log.Fatal().Err(err).Send()
+		log.Fatal().Msg(err.Error())
 	}
 
 	if err := server.ListenAndServe(); err != nil {
-		log.Fatal().Err(err).Send()
+		log.Fatal().Msg(err.Error())
 	}
 }
