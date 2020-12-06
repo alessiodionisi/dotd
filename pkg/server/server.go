@@ -8,8 +8,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/adnsio/dotd/pkg/roundrobin"
@@ -21,8 +23,9 @@ type Server struct {
 	udpAddress         *net.UDPAddr
 	upstreamRoundRobin *roundrobin.RoundRobin
 	udpConnection      *net.UDPConn
-	blocklistMap       map[string]bool
-	resolveMap         map[string]string
+	blocklist          map[string]bool
+	blockRegex         []*regexp.Regexp
+	resolve            map[string]string
 	httpClient         *http.Client
 }
 
@@ -85,7 +88,7 @@ func (s *Server) answerDNSMessage(addr *net.UDPAddr, dnsMessage *dnsmessage.Mess
 		Msgf("dns question from %s", addr.String())
 
 	// try resolve
-	answeredDNSMessage, err := s.answerQuestionWithResolveMap(dnsMessage.ID, &question)
+	answeredDNSMessage, err := s.answerQuestionWithResolve(dnsMessage.ID, &question)
 	if err != nil {
 		return err
 	}
@@ -99,7 +102,17 @@ func (s *Server) answerDNSMessage(addr *net.UDPAddr, dnsMessage *dnsmessage.Mess
 	}
 
 	// try blocklist
-	answeredDNSMessage = s.answerQuestionWithBlocklistMap(dnsMessage.ID, &question)
+	answeredDNSMessage = s.answerQuestionWithBlocklist(dnsMessage.ID, &question)
+	if answeredDNSMessage != nil {
+		if err := s.writeDNSMessageToUPD(answeredDNSMessage, addr); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	// try blockregex
+	answeredDNSMessage = s.answerQuestionWithBlockregex(dnsMessage.ID, &question)
 	if answeredDNSMessage != nil {
 		if err := s.writeDNSMessageToUPD(answeredDNSMessage, addr); err != nil {
 			return err
@@ -199,10 +212,10 @@ func (s *Server) forwardDataToUpstream(id uint16, data []byte) ([]byte, error) {
 	return nil, errors.New("max attempts reached")
 }
 
-func (s *Server) answerQuestionWithBlocklistMap(id uint16, question *dnsmessage.Question) *dnsmessage.Message {
+func (s *Server) answerQuestionWithBlocklist(id uint16, question *dnsmessage.Question) *dnsmessage.Message {
 	name := question.Name.Data[:question.Name.Length-1]
 
-	blocklisted, ok := s.blocklistMap[string(name)]
+	blocklisted, ok := s.blocklist[string(name)]
 	if !ok || !blocklisted {
 		return nil
 	}
@@ -219,16 +232,61 @@ func (s *Server) answerQuestionWithBlocklistMap(id uint16, question *dnsmessage.
 			RecursionDesired:   true,
 			RCode:              dnsmessage.RCodeNameError,
 		},
+		Questions: []dnsmessage.Question{
+			*question,
+		},
 	}
 
 	return answeredDNSMessage
 }
 
-func (s *Server) answerQuestionWithResolveMap(id uint16, question *dnsmessage.Question) (*dnsmessage.Message, error) {
+func (s *Server) answerQuestionWithBlockregex(id uint16, question *dnsmessage.Question) *dnsmessage.Message {
 	name := question.Name.Data[:question.Name.Length-1]
-	resolved, ok := s.resolveMap[string(name)]
+
+	for _, regex := range s.blockRegex {
+		if regex.MatchString(string(name)) {
+			log.Warn().
+				Uint16("id", id).
+				Msgf(`"%s" is blocked from regex`, name)
+
+			answeredDNSMessage := &dnsmessage.Message{
+				Header: dnsmessage.Header{
+					ID:                 id,
+					Response:           true,
+					RecursionAvailable: true,
+					RecursionDesired:   true,
+					RCode:              dnsmessage.RCodeNameError,
+				},
+				Questions: []dnsmessage.Question{
+					*question,
+				},
+			}
+
+			return answeredDNSMessage
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) answerQuestionWithResolve(id uint16, question *dnsmessage.Question) (*dnsmessage.Message, error) {
+	name := question.Name.Data[:question.Name.Length-1]
+
+	resolved, ok := s.resolve[string(name)]
 	if !ok || resolved == "" {
-		return nil, nil
+		// try with wildcard
+		nameSlices := strings.Split(string(name), ".")
+		if len(nameSlices) < 2 {
+			return nil, nil
+		}
+
+		nameWildcard := fmt.Sprintf("*.%s.%s", nameSlices[len(nameSlices)-2], nameSlices[len(nameSlices)-1])
+		_ = nameWildcard
+
+		resolved, ok = s.resolve[nameWildcard]
+		if !ok || resolved == "" {
+			return nil, nil
+		}
 	}
 
 	log.Debug().
@@ -246,6 +304,9 @@ func (s *Server) answerQuestionWithResolveMap(id uint16, question *dnsmessage.Qu
 			Response:           true,
 			RecursionAvailable: true,
 			RecursionDesired:   true,
+		},
+		Questions: []dnsmessage.Question{
+			*question,
 		},
 	}
 
@@ -322,7 +383,8 @@ func New(
 	address string,
 	upstreams []string,
 	blocklist []string,
-	resolveMap map[string]string,
+	blockregex []string,
+	resolve map[string]string,
 ) (*Server, error) {
 	udpAddress, err := parseUDPAddress(address)
 	if err != nil {
@@ -339,20 +401,31 @@ func New(
 		upstreamURLs = append(upstreamURLs, upstreamURL)
 	}
 
-	upstreamRR := roundrobin.New(upstreamURLs)
+	upstreamRoundRobin := roundrobin.New(upstreamURLs)
 
 	blocklistMap := make(map[string]bool, len(blocklist))
 	for _, blocklistItem := range blocklist {
 		blocklistMap[blocklistItem] = true
 	}
 
+	compiledBlockregex := make([]*regexp.Regexp, 0, len(blockregex))
+	for _, regex := range blockregex {
+		compiledRegex, err := regexp.Compile(regex)
+		if err != nil {
+			return nil, err
+		}
+
+		compiledBlockregex = append(compiledBlockregex, compiledRegex)
+	}
+
 	return &Server{
 		udpAddress:         udpAddress,
-		upstreamRoundRobin: upstreamRR,
-		blocklistMap:       blocklistMap,
-		resolveMap:         resolveMap,
+		upstreamRoundRobin: upstreamRoundRobin,
+		blocklist:          blocklistMap,
+		resolve:            resolve,
+		blockRegex:         compiledBlockregex,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: 10 * time.Second,
 		},
 	}, nil
 }

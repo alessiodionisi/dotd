@@ -26,17 +26,19 @@ func init() {
 	_ = viper.BindPFlags(serverCmd.Flags())
 }
 
-func runServer(cmd *cobra.Command, args []string) {
+func runServer(_ *cobra.Command, _ []string) {
 	address := viper.GetString("address")
 	upstreams := viper.GetStringSlice("upstreams")
 	blocklist := viper.GetStringSlice("blocklist")
-	resolveMap := viper.GetStringMapString("resolve")
+	blockregex := viper.GetStringSlice("blockregex")
+	resolve := viper.GetStringMapString("resolve")
 
 	server, err := server.New(
 		address,
 		upstreams,
 		blocklist,
-		resolveMap,
+		blockregex,
+		resolve,
 	)
 	if err != nil {
 		log.Fatal().Msg(err.Error())

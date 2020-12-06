@@ -58,6 +58,7 @@ func initConfig() {
 	}
 
 	viper.AutomaticEnv()
+	viper.SetEnvPrefix("dotd")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

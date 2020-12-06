@@ -18,7 +18,7 @@ brew install adnsio/tap/dotd
 
 ## How to use
 
-Simply run `dotd server` then set `127.0.0.1` for IPv4 and `::1` for IPv6 as primary DNS server.
+Simply run `dotd server` then set `::1` for IPv6 and/or `127.0.0.1` for IPv4 as primary DNS server.
 
 ## License
 
