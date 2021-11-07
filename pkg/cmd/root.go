@@ -56,7 +56,7 @@ func initConfig() {
 		viper.SetConfigFile(configFile)
 	} else {
 		viper.AddConfigPath("$HOME/.config/dotd")
-		viper.SetConfigName("dotd")
+		viper.SetConfigName("config")
 	}
 
 	viper.AutomaticEnv()

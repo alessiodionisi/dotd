@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-var ErrNoURLs = errors.New("no urls available")
+var ErrNoURLs = errors.New("roundrobin: no urls available")
 
 type RoundRobin struct {
 	urls []*url.URL
